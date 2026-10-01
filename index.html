@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Прогулка по Петербургу</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; inset: 0; bottom: 40%; }
+  #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
+           background: #fff; padding: 10px 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  #panel .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  #panel input { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  #panel button { padding: 8px 14px; border: 0; border-radius: 6px; background: #2c3e50; color: #fff;
+                  font-size: 14px; cursor: pointer; white-space: nowrap; }
+  #panel button.active { background: #e67e22; }
+  #panel button.secondary { background: #7f8c8d; }
+  #panel button:disabled { opacity: .6; cursor: default; }
+  #status { font-size: 12px; color: #666; min-height: 14px; }
+  #info { position: absolute; left: 0; right: 0; bottom: 0; height: 40%; z-index: 1000;
+          background: #fff; border-top: 1px solid #ddd; overflow-y: auto; padding: 14px 16px; }
+  #info h2 { margin: 0 0 6px; font-size: 18px; }
+  #info .meta { font-size: 13px; color: #555; line-height: 1.5; }
+  #info .meta b { color: #222; }
+  #info .close { float: right; cursor: pointer; color: #999; font-size: 22px; line-height: 1; }
+  #info .empty { color: #888; font-size: 14px; }
+  .poi-marker { background: transparent; border: none; }
+  .poi-pin { font-size: 22px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)); }
+  #density { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #555; }
+  #density input { flex: 0 0 120px; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <div class="row">
+    <input id="pointA" placeholder="Откуда (адрес)" value="Невский проспект, 1">
+    <input id="pointB" placeholder="Куда (адрес)" value="Набережная реки Мойки, 20">
+  </div>
+  <div class="row">
+    <button id="btnRoute">Построить маршрут</button>
+    <button id="btnHere" class="secondary">А здесь что?</button>
+    <div id="density">
+      <label>Точек на км:</label>
+      <input id="densityInput" type="number" min="0.5" max="10" step="0.5" value="2">
+    </div>
+  </div>
+  <div id="status"></div>
+</div>
+
+<div id="map"></div>
+
+<div id="info">
+  <div class="empty">Выберите точку А и Б, постройте маршрут. Нажмите на любой маркер — узнаете, что это за здание.</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ================== Адрес API ==================
+// Пока пусто — работает с локального сервера (http://localhost:8000)
+// После деплоя на Render подставим сюда адрес, например:
+// const API_BASE = 'https://gorodok-proxy.onrender.com';
+const API_BASE = '';
+
+// ================== Карта ==================
+const map = L.map('map').setView([59.9343, 30.3351], 14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap', maxZoom: 19
+}).addTo(map);
+
+let routeLayer = null;
+let poiLayers = [];
+let hereMode = false;
+let buildingsIndex = null;
+let poiDatabase = null;
+let lastRouteData = null;
+
+const $status = document.getElementById('status');
+const $info = document.getElementById('info');
+const $btnRoute = document.getElementById('btnRoute');
+const $btnHere = document.getElementById('btnHere');
+
+const setStatus = (s) => { $status.textContent = s || ''; };
+const setInfo = (html) => { $info.innerHTML = html; };
+
+// ================== Нормализация адресов ==================
+function normalizeStreet(s) {
+  if (!s) return '';
+  let t = s.toLowerCase().replace(/ё/g, 'е').replace(/[.,()]/g, ' ').trim();
+  t = t.replace(/\bреки\b|\bрека\b|\bреке\b|\bреку\b|\bрек\b/g, ' ');
+  t = t.replace(/\bканала\b|\bканал\b|\bканале\b/g, ' ');
+  t = t.replace(/\bострова\b|\bостров\b/g, ' ');
+  const suffixMap = {
+    'проспект':'пр','проспекта':'пр','проспекте':'пр','проспекту':'пр','просп':'пр',
+    'улица':'ул','улицы':'ул','улице':'ул','улицу':'ул','ул':'ул',
+    'набережная':'наб','набережной':'наб','набережную':'наб','наб':'наб',
+    'переулок':'пер','переулка':'пер','переулке':'пер','переулку':'пер','пер':'пер',
+    'площадь':'пл','площади':'пл','площадью':'пл','пл':'пл',
+    'шоссе':'ш','ш':'ш','бульвар':'б-р','бульвара':'б-р','бульваре':'б-р','б-р':'б-р',
+    'проезд':'пр-д','проезда':'пр-д','проезде':'пр-д',
+    'линия':'л','линии':'л','линию':'л','аллея':'ал','аллеи':'ал','тракт':'тр'
+  };
+  const tokens = t.split(/\s+/).filter(Boolean);
+  const out = [];
+  let suffix = null;
+  for (const tok of tokens) {
+    if (suffixMap[tok] && !suffix) { suffix = suffixMap[tok]; continue; }
+    out.push(tok);
+  }
+  let result = out.join(' ');
+  if (suffix) result = (result + ' ' + suffix).trim();
+  return result.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeHouse(h) {
+  if (!h) return '';
+  return String(h).toLowerCase().replace(/\s+/g, '').replace(/,/g, '')
+    .replace(/a/g, 'а').replace(/b/g, 'б').replace(/c/g, 'с')
+    .replace(/e/g, 'е').replace(/k/g, 'к').replace(/m/g, 'м')
+    .replace(/o/g, 'о').replace(/p/g, 'р').replace(/x/g, 'х').replace(/y/g, 'у');
+}
+
+function normalizeKey(key) {
+  const parts = String(key).split('|');
+  if (parts.length !== 2) return String(key).toLowerCase();
+  return normalizeStreet(parts[0]) + '|' + normalizeHouse(parts[1]);
+}
+
+function lookupBuilding(osmStreet, osmHouse) {
+  if (!buildingsIndex || !osmStreet || !osmHouse) return null;
+  const key = normalizeStreet(osmStreet) + '|' + normalizeHouse(osmHouse);
+  return buildingsIndex.get(key) || null;
+}
+
+// ================== Загрузка данных ==================
+async function loadData() {
+  setStatus('Загружаю базу Citywalls…');
+  try {
+    const resp = await fetch('buildings_index.json');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const raw = await resp.json();
+    buildingsIndex = new Map();
+    for (const [key, value] of Object.entries(raw)) {
+      const norm = normalizeKey(key);
+      if (!buildingsIndex.has(norm)) buildingsIndex.set(norm, []);
+      buildingsIndex.get(norm).push(...value);
+    }
+    setStatus(`Citywalls: ${buildingsIndex.size} адресов. Загружаю POI…`);
+    const respPoi = await fetch('poi_spb.json');
+    if (!respPoi.ok) throw new Error('HTTP ' + respPoi.status);
+    poiDatabase = await respPoi.json();
+    setStatus(`Готово: ${buildingsIndex.size} адресов, ${poiDatabase.length} POI`);
+  } catch (e) {
+    setStatus('Ошибка загрузки данных: ' + e.message);
+  }
+}
+
+// ================== Геокодирование ==================
+async function geocode(query) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+  const resp = await fetch(url, { headers: { 'Accept-Language': 'ru' } });
+  const data = await resp.json();
+  if (!data.length) throw new Error('Адрес не найден: ' + query);
+  return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+}
+
+// ================== Маршрут ==================
+async function buildRoute() {
+  const qA = document.getElementById('pointA').value.trim();
+  const qB = document.getElementById('pointB').value.trim();
+  if (!qA || !qB) return;
+  try {
+    $btnRoute.disabled = true;
+    setStatus('Ищу точки А и Б…');
+    const [a, b] = await Promise.all([geocode(qA), geocode(qB)]);
+    setStatus('Строю маршрут…');
+    const url = `https://router.project-osrm.org/route/v1/foot/${a[1]},${a[0]};${b[1]},${b[0]}?geometries=geojson&overview=full`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!data.routes || !data.routes.length) throw new Error('Маршрут не найден');
+    const route = data.routes[0];
+    const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
+    if (routeLayer) map.removeLayer(routeLayer);
+    routeLayer = L.polyline(coords, { color: '#2980b9', weight: 5, opacity: 0.8 }).addTo(map);
+    map.fitBounds(routeLayer.getBounds(), { padding: [30, 30] });
+    setStatus(`Маршрут: ${(route.distance / 1000).toFixed(2)} км. Ищу точки…`);
+    findPOIs(coords, route.distance);
+  } catch (e) {
+    setStatus('Ошибка: ' + e.message);
+  } finally {
+    $btnRoute.disabled = false;
+  }
+}
+
+// ================== Поиск POI со взвешенным рандомом ==================
+function findPOIs(routeCoords, distanceMeters) {
+  poiLayers.forEach(l => map.removeLayer(l));
+  poiLayers = [];
+
+  const oldBtn = document.getElementById('btnReshuffle');
+  if (oldBtn) oldBtn.remove();
+
+  if (!poiDatabase) { setStatus('База POI не загружена'); return; }
+
+  const lats = routeCoords.map(c => c[0]);
+  const lons = routeCoords.map(c => c[1]);
+  const pad = 0.002;
+  const minLat = Math.min(...lats) - pad, maxLat = Math.max(...lats) + pad;
+  const minLon = Math.min(...lons) - pad, maxLon = Math.max(...lons) + pad;
+
+  const RADIUS = 150;
+  const near = [];
+  for (const p of poiDatabase) {
+    if (p.lat < minLat || p.lat > maxLat || p.lon < minLon || p.lon > maxLon) continue;
+    const d = distanceToRoute([p.lat, p.lon], routeCoords);
+    if (d <= RADIUS) near.push({ ...p, distance: d });
+  }
+
+  const scored = near.map(p => {
+    let score = 0;
+    const t = p.tags || {};
+    if (p.name) score += 3;
+    if (t.historic) score += 4;
+    if (t.tourism === 'attraction' || t.tourism === 'museum') score += 3;
+    if (t.memorial) score += 3;
+    if (t.artwork || t.tourism === 'artwork') score += 1;
+    if (t.heritage) score += 3;
+    if (t.wikipedia) score += 2;
+    score -= p.distance / 100;
+    return { ...p, score: Math.max(0.5, score) };
+  });
+
+  const perKm = parseFloat(document.getElementById('densityInput').value) || 2;
+  const routeKm = distanceMeters / 1000;
+  const targetCount = Math.max(3, Math.round(routeKm * perKm));
+
+  const chosen = [];
+  const positionCheck = [];
+  let pool = scored.slice();
+  let attempts = 0;
+
+  while (chosen.length < targetCount && pool.length > 0 && attempts < 300) {
+    attempts++;
+    const totalWeight = pool.reduce((s, p) => s + p.score, 0);
+    let r = Math.random() * totalWeight;
+    let idx = 0;
+    for (let i = 0; i < pool.length; i++) {
+      r -= pool[i].score;
+      if (r <= 0) { idx = i; break; }
+    }
+    const pick = pool[idx];
+    pool.splice(idx, 1);
+    const tooClose = positionCheck.some(pos => haversine(pos, [pick.lat, pick.lon]) < 80);
+    if (!tooClose) {
+      chosen.push(pick);
+      positionCheck.push([pick.lat, pick.lon]);
+    }
+  }
+
+  chosen.sort((a, b) =>
+    nearestIndex([a.lat, a.lon], routeCoords) - nearestIndex([b.lat, b.lon], routeCoords));
+
+  chosen.forEach((poi, i) => {
+    const icon = L.divIcon({
+      className: 'poi-marker',
+      html: `<div class="poi-pin">📍</div>`,
+      iconSize: [24, 24], iconAnchor: [12, 22]
+    });
+    const m = L.marker([poi.lat, poi.lon], { icon }).addTo(map);
+    m.on('click', () => showPoiCard(poi, i + 1));
+    poiLayers.push(m);
+  });
+
+  lastRouteData = { routeCoords, distanceMeters };
+
+  if (near.length > targetCount) {
+    const btn = document.createElement('button');
+    btn.id = 'btnReshuffle';
+    btn.textContent = '🎲 Показать другие точки';
+    btn.style.cssText = 'position:absolute;top:118px;right:12px;z-index:1000;padding:8px 12px;border:0;border-radius:6px;background:#8e44ad;color:#fff;cursor:pointer;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.25)';
+    btn.addEventListener('click', () => {
+      if (lastRouteData) findPOIs(lastRouteData.routeCoords, lastRouteData.distanceMeters);
+    });
+    document.body.appendChild(btn);
+  }
+
+  setStatus(`Готово: ${chosen.length} точек из ${near.length} рядом. Не нравятся — нажми «🎲».`);
+}
+
+// ================== Геометрия ==================
+function distanceToRoute(point, coords) {
+  let min = Infinity;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const d = distanceToSegment(point, coords[i], coords[i + 1]);
+    if (d < min) min = d;
+  }
+  return min;
+}
+function nearestIndex(point, coords) {
+  let min = Infinity, idx = 0;
+  for (let i = 0; i < coords.length; i++) {
+    const d = haversine(point, coords[i]);
+    if (d < min) { min = d; idx = i; }
+  }
+  return idx;
+}
+function distanceToSegment(p, a, b) {
+  const toRad = Math.PI / 180;
+  const latScale = 111320;
+  const lonScale = 111320 * Math.cos(p[0] * toRad);
+  const px = p[1] * lonScale, py = p[0] * latScale;
+  const ax = a[1] * lonScale, ay = a[0] * latScale;
+  const bx = b[1] * lonScale, by = b[0] * latScale;
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx, cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+function haversine(a, b) {
+  const toRad = Math.PI / 180;
+  const R = 6371000;
+  const dLat = (b[0] - a[0]) * toRad;
+  const dLon = (b[1] - a[1]) * toRad;
+  const s = Math.sin(dLat/2)**2 + Math.cos(a[0]*toRad)*Math.cos(b[0]*toRad)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+// ================== Карточка POI ==================
+function showPoiCard(poi, num) {
+  const t = poi.tags || {};
+  const name = t['name:ru'] || t.name || poi.name || 'Без названия';
+  const street = t['addr:street'];
+  const house = t['addr:housenumber'];
+  const isMemorial = t.historic === 'memorial' || !!t.memorial;
+
+  let cw = null;
+  if (!isMemorial && street && house) cw = lookupBuilding(street, house);
+  const cwItem = cw && cw.length ? cw[0] : null;
+
+  const osmKind = describeOsm(t);
+  const lines = [];
+
+  if (cwItem) {
+    lines.push(`<div class="meta">
+      <div><b>Citywalls:</b> ${escapeHtml(cwItem.name || '')}</div>
+      ${cwItem.architects ? `<div><b>Архитекторы:</b> ${escapeHtml(cwItem.architects)}</div>` : ''}
+      ${cwItem.years ? `<div><b>Год постройки:</b> ${escapeHtml(cwItem.years)}</div>` : ''}
+      ${cwItem.style ? `<div><b>Стиль:</b> ${escapeHtml(cwItem.style)}</div>` : ''}
+    </div>`);
+  } else if (isMemorial) {
+    lines.push(`<div class="meta">Памятник / мемориальный объект.</div>`);
+  } else if (street || house) {
+    lines.push(`<div class="meta">В базе Citywalls по этому адресу данных нет.</div>`);
+  }
+
+  if (street || house) {
+    lines.push(`<div class="meta" style="margin-top:8px"><b>Адрес (OSM):</b> ${escapeHtml(street || '')}${house ? ', ' + escapeHtml(house) : ''}</div>`);
+  }
+  if (osmKind) {
+    lines.push(`<div class="meta"><b>Тип (OSM):</b> ${escapeHtml(osmKind)}</div>`);
+  }
+
+  setInfo(`
+    <span class="close" onclick="document.getElementById('info').innerHTML=''">×</span>
+    <h2>${num ? num + '. ' : ''}${escapeHtml(name)}</h2>
+    ${lines.join('')}
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid #eee">
+      <button id="btnStory" style="padding:8px 14px;border:0;border-radius:6px;background:#8e44ad;color:#fff;cursor:pointer;font-size:14px">
+        ✨ Расскажи подробнее
+      </button>
+      <button id="btnStoryAgain" style="display:none;margin-left:8px;padding:8px 14px;border:0;border-radius:6px;background:#95a5a6;color:#fff;cursor:pointer;font-size:13px">
+        🔄 Другой вариант
+      </button>
+      <button id="btnSpeak" style="display:none;margin-left:8px;padding:8px 14px;border:0;border-radius:6px;background:#16a085;color:#fff;cursor:pointer;font-size:13px">
+        🔊 Озвучить
+      </button>
+      <button id="btnStop" style="display:none;margin-left:8px;padding:8px 14px;border:0;border-radius:6px;background:#c0392b;color:#fff;cursor:pointer;font-size:13px">
+        ⏹ Стоп
+      </button>
+      <div id="storyText" style="margin-top:10px;font-size:15px;line-height:1.55;color:#333"></div>
+      <audio id="audioPlayer" style="display:none;margin-top:10px;width:100%" controls></audio>
+    </div>
+  `);
+
+  const btnStory = document.getElementById('btnStory');
+  const btnAgain = document.getElementById('btnStoryAgain');
+  const btnSpeak = document.getElementById('btnSpeak');
+  const btnStop = document.getElementById('btnStop');
+  const storyText = document.getElementById('storyText');
+  const audioPlayer = document.getElementById('audioPlayer');
+  let audioUrl = null;
+
+  const run = async (forceNew) => {
+    btnStory.disabled = true;
+    btnAgain.disabled = true;
+    storyText.textContent = '✨ Генерирую…';
+    try {
+      await generateStory(poi, { forceNew });
+      btnAgain.style.display = 'inline-block';
+      if (storyText.textContent.trim().length > 20) {
+        btnSpeak.style.display = 'inline-block';
+      }
+    } catch (e) {
+      storyText.textContent = 'Не получилось: ' + e.message;
+    } finally {
+      btnStory.disabled = false;
+      btnAgain.disabled = false;
+    }
+  };
+
+  btnStory.addEventListener('click', () => run(false));
+  btnAgain.addEventListener('click', () => run(true));
+
+  btnSpeak.addEventListener('click', async () => {
+    const text = storyText.textContent.trim();
+    if (!text || text.length < 20) return;
+
+    btnSpeak.disabled = true;
+    btnSpeak.textContent = '⏳ Синтезирую…';
+
+    try {
+      const resp = await fetch(API_BASE + '/api/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, voice: 'ru-RU-DmitryNeural' })
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error('HTTP ' + resp.status + ': ' + errText.slice(0, 200));
+      }
+
+      const blob = await resp.blob();
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      audioUrl = URL.createObjectURL(blob);
+
+      audioPlayer.src = audioUrl;
+      audioPlayer.style.display = 'block';
+      await audioPlayer.play();
+
+      btnStop.style.display = 'inline-block';
+      btnSpeak.textContent = '🔊 Озвучить';
+    } catch (e) {
+      btnSpeak.textContent = '❌ Ошибка';
+      storyText.textContent += '\n\n[Ошибка озвучки: ' + e.message + ']';
+      setTimeout(() => { btnSpeak.textContent = '🔊 Озвучить'; }, 3000);
+    } finally {
+      btnSpeak.disabled = false;
+    }
+  });
+
+  btnStop.addEventListener('click', () => {
+    audioPlayer.pause();
+    audioPlayer.currentTime = 0;
+    btnStop.style.display = 'none';
+  });
+
+  audioPlayer.addEventListener('ended', () => {
+    btnStop.style.display = 'none';
+  });
+}
+
+function describeOsm(t) {
+  if (t.historic) return 'историческое место: ' + t.historic;
+  if (t.tourism === 'attraction') return 'достопримечательность';
+  if (t.tourism === 'museum') return 'музей';
+  if (t.memorial) return 'мемориал';
+  if (t.artwork) return 'произведение искусства';
+  if (t.tourism === 'artwork') return 'арт-объект';
+  return '';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ================== GigaChat ==================
+const OPENINGS = [
+  'Начни с конкретной сцены: что происходило здесь в определённый год — с датой, местом, действующим лицом.',
+  'Начни с парадокса: «многие думают X, а на самом деле Y».',
+  'Начни с цифры или факта, который удивляет.',
+  'Начни с короткого вопроса, на который тут же сам ответишь.',
+  'Начни с прямой речи или реплики — как если бы ты цитировал документ, письмо, разговор.',
+  'Начни с описания одной детали: надписи, трещины, странного элемента, который видно на фасаде.',
+  'Начни с бытовой сцены из прошлого: кто-то заходит, кто-то выходит, что-то происходит.',
+  'Начни с контраста «тогда vs сейчас».',
+  'Начни с имени человека и одной его фразы или поступка.',
+  'Начни с ошибки: «этот объект часто путают с...» или «вопреки распространённому мнению...».'
+];
+
+const recentOpenings = [];
+const storyCache = new Map();
+
+async function generateStory(poi, { forceNew = false } = {}) {
+  const t = poi.tags || {};
+  const cacheKey = poi.id || ('addr:' + (t['addr:street'] || '') + '|' + (t['addr:housenumber'] || ''));
+
+  if (!forceNew && storyCache.has(cacheKey)) {
+    const cached = storyCache.get(cacheKey);
+    const el = document.getElementById('storyText');
+    if (el) el.textContent = cached;
+    return cached;
+  }
+
+  const facts = [];
+  if (t.historic) facts.push(`Тип (OSM): ${t.historic}`);
+  if (t.memorial) facts.push(`Мемориал: ${t.memorial}`);
+  if (t.tourism) facts.push(`Туризм: ${t.tourism}`);
+  if (t.artwork) facts.push(`Арт-объект: ${t.artwork}`);
+  if (t.architect) facts.push(`Тег architect в OSM: ${t.architect}`);
+  if (t.year) facts.push(`Год: ${t.year}`);
+
+  if (t['addr:street'] && t['addr:housenumber']) {
+    const cw = lookupBuilding(t['addr:street'], t['addr:housenumber']);
+    if (cw && cw.length) {
+      const c = cw[0];
+      if (c.name) facts.push(`Историческое название: ${c.name}`);
+      if (c.architects) facts.push(`Архитекторы (Citywalls): ${c.architects}`);
+      if (c.years) facts.push(`Годы постройки: ${c.years}`);
+      if (c.style) facts.push(`Стиль: ${c.style}`);
+    }
+  }
+
+  let wiki = '';
+  const wikiTag = t.wikipedia || t['wikipedia:ru'] || t['subject:wikipedia'];
+  if (wikiTag) {
+    const title = wikiTag.replace(/^ru:/, '').replace(/#.*$/, '').replace(/\|.*$/, '').trim();
+    console.log('[Wiki] Ищем:', title);
+    try {
+      const apiUrl = `https://ru.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext&redirects=1&format=json&origin=*&titles=${encodeURIComponent(title)}`;
+      const resp = await fetch(apiUrl);
+      if (resp.ok) {
+        const data = await resp.json();
+        const first = Object.values(data.query?.pages || {})[0];
+        if (first && first.extract) {
+          let full = first.extract;
+          for (const marker of ['== Ссылки ==', '== Литература ==', '== Примечания ==', '== Источники ==']) {
+            const idx = full.indexOf(marker);
+            if (idx > 0) full = full.slice(0, idx);
+          }
+          if (full.length > 2500) {
+            full = full.slice(0, 2500);
+            const lastDot = full.lastIndexOf('.');
+            if (lastDot > 1500) full = full.slice(0, lastDot + 1);
+          }
+          wiki = full.trim();
+          console.log('[Wiki] Получено', wiki.length, 'символов');
+        }
+      }
+    } catch (e) { console.warn('[Wiki] ошибка:', e.message); }
+    if (!wiki) console.warn('[Wiki] Ничего не нашли');
+  } else {
+    console.log('[Wiki] Тег wikipedia отсутствует');
+  }
+
+  const angle = OPENINGS[Math.floor(Math.random() * OPENINGS.length)];
+  const avoidOpenings = recentOpenings.slice(-3).map(s => '• ' + s).join('\n');
+
+  const system = `Ты — опытный экскурсовод по Санкт-Петербургу. Пишешь рассказы для аудиогида длиной 250-350 слов (3-4 абзаца).
+
+СТРУКТУРА:
+1. Абзац 1 — зацепка (см. инструкцию ниже).
+2. Абзац 2 — контекст: что за объект, кто создал, когда и зачем. Только конкретные имена, даты, цифры из фактов.
+3. Абзац 3 — деталь, которую не видно с первого взгляда. Что человек увидит, если присмотрится.
+4. Абзац 4 — короткое завершение, одна фраза на послевкусие.
+
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО начинать рассказ с фраз:
+- «Представьте себе»
+- «Представьте»
+- «Мы стоим»
+- «Перед нами»
+- «Этот объект»
+- «Этот памятник»
+- «Это здание»
+- «Сегодня мы»
+- «Добро пожаловать»
+- «В самом сердце»
+
+Не начинай с этих словосочетаний даже частично. Не начинай с абстрактного описания погоды, фонарей или атмосферы.
+
+${avoidOpenings ? 'НЕ начинай рассказ так же, как эти недавние рассказы:\n' + avoidOpenings + '\n' : ''}
+
+Начни так:
+${angle}
+
+СТИЛЬ:
+- Живой, но не панибратский. Как хороший экскурсовод, а не как Википедия.
+- Обращайся к слушателю («посмотрите», «обратите внимание») — но не в первом предложении.
+- Избегай штампов: «величественный», «уникальный», «жемчужина», «гордость города», «богатое культурное наследие», «дух времени», «неповторимая атмосфера».
+
+НЕ ВЫДУМЫВАЙ:
+- Имена, даты, события — только из блоков «Факты» и «Контекст из Wikipedia».
+- OSM-тег "architect" у памятников часто означает архитектора постамента, а не скульптора. Если в Wikipedia есть имя скульптора — используй его.
+- Если информации мало — пиши короче, но не выдумывай.`;
+
+  const user = `Объект: ${t['name:ru'] || t.name || poi.name || 'Без названия'}
+
+Факты:
+${facts.length ? facts.map(f => '• ' + f).join('\n') : '• (фактов мало)'}
+
+${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wikipedia отсутствует.'}
+
+Напиши рассказ для аудиогида по структуре из 4 абзацев.`;
+
+  const storyEl = document.getElementById('storyText');
+  if (storyEl) storyEl.textContent = '✨ Генерирую…';
+
+  const resp = await fetch(API_BASE + '/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'GigaChat',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      temperature: 0.9,
+      max_tokens: 900,
+      stream: true,
+    })
+  });
+
+  if (!resp.ok) throw new Error('GigaChat: HTTP ' + resp.status);
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let full = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') continue;
+      try {
+        const obj = JSON.parse(data);
+        const delta = obj.choices?.[0]?.delta?.content;
+        if (delta) { full += delta; if (storyEl) storyEl.textContent = full; }
+      } catch (e) { /* skip */ }
+    }
+  }
+
+  storyCache.set(cacheKey, full);
+  const opening = full.slice(0, 60).replace(/\n/g, ' ').trim();
+  recentOpenings.push(opening);
+  if (recentOpenings.length > 5) recentOpenings.shift();
+
+  return full;
+}
+
+// ================== «А здесь что?» ==================
+$btnHere.addEventListener('click', () => {
+  hereMode = !hereMode;
+  $btnHere.classList.toggle('active', hereMode);
+  setStatus(hereMode ? 'Тапни по любому месту на карте' : '');
+});
+
+async function reverseGeocode(lat, lon) {
+  const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`;
+  const resp = await fetch(url, { headers: { 'Accept-Language': 'ru' } });
+  if (!resp.ok) throw new Error('Nominatim ' + resp.status);
+  return await resp.json();
+}
+
+map.on('click', async (e) => {
+  if (!hereMode) return;
+  const { lat, lng } = e.latlng;
+  setStatus('Смотрю, что здесь…');
+  try {
+    const data = await reverseGeocode(lat, lng);
+    const addr = data.address || {};
+    const street = addr.road || addr.pedestrian || addr.footway || addr.square || '';
+    const house = addr.house_number || '';
+
+    let cwItem = null;
+    if (street && house) {
+      const cw = lookupBuilding(street, house);
+      if (cw && cw.length) cwItem = cw[0];
+    }
+
+    let nearestPoi = null, nearestD = 30;
+    if (poiDatabase) {
+      for (const p of poiDatabase) {
+        const d = haversine([lat, lng], [p.lat, p.lon]);
+        if (d < nearestD) { nearestD = d; nearestPoi = p; }
+      }
+    }
+
+    const lines = [];
+    if (cwItem) {
+      lines.push(`<div class="meta">
+        <div><b>Citywalls:</b> ${escapeHtml(cwItem.name || '')}</div>
+        ${cwItem.architects ? `<div><b>Архитекторы:</b> ${escapeHtml(cwItem.architects)}</div>` : ''}
+        ${cwItem.years ? `<div><b>Год постройки:</b> ${escapeHtml(cwItem.years)}</div>` : ''}
+        ${cwItem.style ? `<div><b>Стиль:</b> ${escapeHtml(cwItem.style)}</div>` : ''}
+      </div>`);
+    } else if (street) {
+      lines.push(`<div class="meta">В базе Citywalls по этому адресу данных нет.</div>`);
+    } else {
+      lines.push(`<div class="meta">Не удалось определить адрес.</div>`);
+    }
+
+    if (street) {
+      lines.push(`<div class="meta" style="margin-top:8px"><b>Адрес:</b> ${escapeHtml(street)}${house ? ', ' + escapeHtml(house) : ''}</div>`);
+    }
+
+    if (nearestPoi && (!cwItem || nearestD > 15)) {
+      const nt = nearestPoi.tags || {};
+      const nName = nt['name:ru'] || nt.name || nearestPoi.name || 'Объект';
+      const nKind = describeOsm(nt);
+      lines.push(`<div class="meta" style="margin-top:12px;padding-top:10px;border-top:1px solid #eee">
+        <b>Рядом (${Math.round(nearestD)} м):</b> ${escapeHtml(nName)}
+        ${nKind ? `<br><span style="color:#888;font-size:12px">${escapeHtml(nKind)}</span>` : ''}
+      </div>`);
+    }
+
+    const title = cwItem ? cwItem.name
+                  : (street ? `${street}${house ? ', ' + house : ''}` : 'Место на карте');
+
+    setInfo(`
+      <span class="close" onclick="document.getElementById('info').innerHTML=''">×</span>
+      <h2>${escapeHtml(title)}</h2>
+      ${lines.join('')}
+    `);
+    setStatus('');
+  } catch (err) {
+    setStatus('Ошибка: ' + err.message);
+  }
+});
+
+// ================== Старт ==================
+$btnRoute.addEventListener('click', buildRoute);
+loadData();
+</script>
+</body>
+</html>

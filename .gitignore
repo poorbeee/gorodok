@@ -1,0 +1,19 @@
+# Секреты
+key.txt
+speech_key.txt
+google-tts-key.json
+
+# Тяжёлое
+*.pbf
+citywalls-main/data/
+citywalls-main/buildings.json
+citywalls-main/citywalls_full.jsonl
+citywalls-main/parse_progress.txt
+citywalls-main/all_house_ids.txt
+citywalls-main/house_ids.txt
+
+# Мусор
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
