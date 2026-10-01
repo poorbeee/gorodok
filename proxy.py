@@ -122,7 +122,7 @@ if __name__ == '__main__':
     if not GIGACHAT_KEY:
         print('Нет GigaChat ключа. Создай key.txt.')
         exit(1)
-    port = int(os.environ.get('PORT', 8000))
+    port = int(os.environ.get('PORT', 8080))
     print(f'Сервер: http://0.0.0.0:{port}')
     print(f'GigaChat ключ: {len(GIGACHAT_KEY)} символов')
     app.run(host='0.0.0.0', port=port, threaded=True)
