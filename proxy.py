@@ -11,18 +11,13 @@ urllib3.disable_warnings()
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
-# --- CORS для работы с GitHub Pages ---
+# --- CORS ---
 @app.after_request
 def add_cors(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
-
-@app.route('/api/<path:_any>', methods=['OPTIONS'])
-def cors_preflight(_any):
-    return Response('', status=204)
-
 
 # --- GigaChat ---
 _key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'key.txt')
@@ -63,14 +58,18 @@ def health():
     return {'status': 'ok', 'has_key': bool(GIGACHAT_KEY)}
 
 
-@app.route('/api/chat', methods=['POST'])
+@app.route('/api/chat', methods=['POST', 'OPTIONS'])
 def chat():
+    if request.method == 'OPTIONS':
+        return Response('', status=204)
+
     if not GIGACHAT_KEY:
         return Response('GIGACHAT_KEY пустой', status=500)
     try:
         token = get_token()
     except Exception as e:
         return Response(f'Ошибка токена: {e}', status=500)
+
     body = request.get_json()
     upstream = requests.post(GIGACHAT_URL, headers={
         'Authorization': f'Bearer {token}',
@@ -85,8 +84,11 @@ def chat():
     return Response(generate(), content_type='text/event-stream')
 
 
-@app.route('/api/speech', methods=['POST'])
+@app.route('/api/speech', methods=['POST', 'OPTIONS'])
 def speech():
+    if request.method == 'OPTIONS':
+        return Response('', status=204)
+
     data = request.get_json()
     text = data.get('text', '').strip()
     voice = data.get('voice', 'ru-RU-DmitryNeural')
