@@ -10,7 +10,8 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png"/>
 <meta name="theme-color" content="#8e44ad"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
-<meta name="apple-mobile-web-app-title" content="Прогулка"/><style>
+<meta name="apple-mobile-web-app-title" content="Прогулка"/>
+<style>
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   #map { position: absolute; inset: 0; bottom: 40%; }
@@ -64,9 +65,6 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 // ================== Адрес API ==================
-// Пока пусто — работает с локального сервера (http://localhost:8000)
-// После деплоя на Render подставим сюда адрес, например:
-// const API_BASE = 'https://gorodok-proxy-poorbeee.amvera.io';
 const API_BASE = 'https://gorodok-proxy-poorbeee.amvera.io';
 
 // ================== Карта ==================
@@ -233,6 +231,8 @@ function findPOIs(routeCoords, distanceMeters) {
     if (t.artwork || t.tourism === 'artwork') score += 1;
     if (t.heritage) score += 3;
     if (t.wikipedia) score += 2;
+    if (p.category === 'historic_building') score += 1;
+    if (p.category === 'heritage_building') score += 4;
     score -= p.distance / 100;
     return { ...p, score: Math.max(0.5, score) };
   });
@@ -365,6 +365,12 @@ function showPoiCard(poi, num) {
   if (street || house) {
     lines.push(`<div class="meta" style="margin-top:8px"><b>Адрес (OSM):</b> ${escapeHtml(street || '')}${house ? ', ' + escapeHtml(house) : ''}</div>`);
   }
+  if (t.architect) {
+    lines.push(`<div class="meta"><b>Архитектор (OSM):</b> ${escapeHtml(t.architect)}</div>`);
+  }
+  if (t.start_date) {
+    lines.push(`<div class="meta"><b>Год постройки (OSM):</b> ${escapeHtml(t.start_date)}</div>`);
+  }
   if (osmKind) {
     lines.push(`<div class="meta"><b>Тип (OSM):</b> ${escapeHtml(osmKind)}</div>`);
   }
@@ -428,10 +434,11 @@ function showPoiCard(poi, num) {
     btnSpeak.textContent = '⏳ Синтезирую…';
 
     try {
+      const payload = JSON.stringify({ text: text, voice: 'ru-RU-DmitryNeural' });
       const resp = await fetch(API_BASE + '/api/speech', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: text, voice: 'ru-RU-DmitryNeural' })
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'payload=' + encodeURIComponent(payload)
       });
 
       if (!resp.ok) {
@@ -476,6 +483,8 @@ function describeOsm(t) {
   if (t.memorial) return 'мемориал';
   if (t.artwork) return 'произведение искусства';
   if (t.tourism === 'artwork') return 'арт-объект';
+  if (t.heritage) return 'объект наследия';
+  if (t.building) return 'историческое здание';
   return '';
 }
 
@@ -516,8 +525,11 @@ async function generateStory(poi, { forceNew = false } = {}) {
   if (t.memorial) facts.push(`Мемориал: ${t.memorial}`);
   if (t.tourism) facts.push(`Туризм: ${t.tourism}`);
   if (t.artwork) facts.push(`Арт-объект: ${t.artwork}`);
-  if (t.architect) facts.push(`Тег architect в OSM: ${t.architect}`);
+  if (t.architect) facts.push(`Архитектор (из OSM): ${t.architect}`);
+  if (t.start_date) facts.push(`Год постройки (OSM): ${t.start_date}`);
   if (t.year) facts.push(`Год: ${t.year}`);
+  if (t.heritage) facts.push(`Объект наследия: ${t.heritage}`);
+  if (t.building) facts.push(`Тип здания: ${t.building}`);
 
   if (t['addr:street'] && t['addr:housenumber']) {
     const cw = lookupBuilding(t['addr:street'], t['addr:housenumber']);
@@ -574,13 +586,8 @@ async function generateStory(poi, { forceNew = false } = {}) {
 4. Абзац 4 — короткое завершение, одна фраза на послевкусие.
 
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО начинать рассказ с фраз:
-- «Представьте себе»
-- «Представьте»
 - «Мы стоим»
-- «Перед нами»
 - «Этот объект»
-- «Этот памятник»
-- «Это здание»
 - «Сегодня мы»
 - «Добро пожаловать»
 - «В самом сердце»
@@ -614,19 +621,21 @@ ${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wi
   const storyEl = document.getElementById('storyText');
   if (storyEl) storyEl.textContent = '✨ Генерирую…';
 
+  const payload = JSON.stringify({
+    model: 'GigaChat',
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    temperature: 0.9,
+    max_tokens: 900,
+    stream: true,
+  });
+
   const resp = await fetch(API_BASE + '/api/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'GigaChat',
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user }
-      ],
-      temperature: 0.9,
-      max_tokens: 900,
-      stream: true,
-    })
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'payload=' + encodeURIComponent(payload)
   });
 
   if (!resp.ok) throw new Error('GigaChat: HTTP ' + resp.status);
@@ -686,12 +695,14 @@ map.on('click', async (e) => {
     const street = addr.road || addr.pedestrian || addr.footway || addr.square || '';
     const house = addr.house_number || '';
 
+    // Проверяем Citywalls
     let cwItem = null;
     if (street && house) {
       const cw = lookupBuilding(street, house);
       if (cw && cw.length) cwItem = cw[0];
     }
 
+    // Ищем ближайший POI в 30 м
     let nearestPoi = null, nearestD = 30;
     if (poiDatabase) {
       for (const p of poiDatabase) {
@@ -700,42 +711,36 @@ map.on('click', async (e) => {
       }
     }
 
-    const lines = [];
-    if (cwItem) {
-      lines.push(`<div class="meta">
-        <div><b>Citywalls:</b> ${escapeHtml(cwItem.name || '')}</div>
-        ${cwItem.architects ? `<div><b>Архитекторы:</b> ${escapeHtml(cwItem.architects)}</div>` : ''}
-        ${cwItem.years ? `<div><b>Год постройки:</b> ${escapeHtml(cwItem.years)}</div>` : ''}
-        ${cwItem.style ? `<div><b>Стиль:</b> ${escapeHtml(cwItem.style)}</div>` : ''}
-      </div>`);
-    } else if (street) {
-      lines.push(`<div class="meta">В базе Citywalls по этому адресу данных нет.</div>`);
-    } else {
-      lines.push(`<div class="meta">Не удалось определить адрес.</div>`);
+    // Если совсем ничего нет — сообщение
+    if (!street && !cwItem && !nearestPoi) {
+      setInfo(`<span class="close" onclick="this.parentNode.innerHTML=''">×</span>
+        <h2>Здесь ничего не нашлось</h2>
+        <div class="meta">Не удалось определить адрес в этой точке. Попробуй тапнуть ближе к зданию.</div>`);
+      setStatus('');
+      return;
     }
 
-    if (street) {
-      lines.push(`<div class="meta" style="margin-top:8px"><b>Адрес:</b> ${escapeHtml(street)}${house ? ', ' + escapeHtml(house) : ''}</div>`);
+    // Собираем виртуальный POI для showPoiCard
+    const virtualTags = {};
+    if (nearestPoi && nearestPoi.tags) {
+      Object.assign(virtualTags, nearestPoi.tags);
+    }
+    if (street) virtualTags['addr:street'] = street;
+    if (house) virtualTags['addr:housenumber'] = house;
+    // Если у POI нет имени, но есть в Citywalls — используем его
+    if (!virtualTags.name && !virtualTags['name:ru'] && cwItem && cwItem.name) {
+      virtualTags['name:ru'] = cwItem.name;
     }
 
-    if (nearestPoi && (!cwItem || nearestD > 15)) {
-      const nt = nearestPoi.tags || {};
-      const nName = nt['name:ru'] || nt.name || nearestPoi.name || 'Объект';
-      const nKind = describeOsm(nt);
-      lines.push(`<div class="meta" style="margin-top:12px;padding-top:10px;border-top:1px solid #eee">
-        <b>Рядом (${Math.round(nearestD)} м):</b> ${escapeHtml(nName)}
-        ${nKind ? `<br><span style="color:#888;font-size:12px">${escapeHtml(nKind)}</span>` : ''}
-      </div>`);
-    }
+    const virtualPoi = {
+      id: (nearestPoi && nearestPoi.id) || ('addr:' + street + '|' + house + '|' + lat.toFixed(5) + ',' + lng.toFixed(5)),
+      lat: lat,
+      lon: lng,
+      name: (nearestPoi && nearestPoi.name) || (cwItem && cwItem.name) || null,
+      tags: virtualTags,
+    };
 
-    const title = cwItem ? cwItem.name
-                  : (street ? `${street}${house ? ', ' + house : ''}` : 'Место на карте');
-
-    setInfo(`
-      <span class="close" onclick="document.getElementById('info').innerHTML=''">×</span>
-      <h2>${escapeHtml(title)}</h2>
-      ${lines.join('')}
-    `);
+    showPoiCard(virtualPoi, null);
     setStatus('');
   } catch (err) {
     setStatus('Ошибка: ' + err.message);
