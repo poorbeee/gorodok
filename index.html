@@ -434,11 +434,10 @@ function showPoiCard(poi, num) {
     btnSpeak.textContent = '⏳ Синтезирую…';
 
     try {
-      const payload = JSON.stringify({ text: text, voice: 'ru-RU-DmitryNeural' });
       const resp = await fetch(API_BASE + '/api/speech', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'payload=' + encodeURIComponent(payload)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, voice: 'ru-RU-DmitryNeural' })
       });
 
       if (!resp.ok) {
@@ -621,15 +620,19 @@ ${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wi
   const storyEl = document.getElementById('storyText');
   if (storyEl) storyEl.textContent = '✨ Генерирую…';
 
-  const payload = JSON.stringify({
-    model: 'GigaChat',
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ],
-    temperature: 0.9,
-    max_tokens: 900,
-    stream: true,
+  const resp = await fetch(API_BASE + '/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'GigaChat',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      temperature: 0.9,
+      max_tokens: 900,
+      stream: true,
+    })
   });
 
   const resp = await fetch(API_BASE + '/api/chat', {
