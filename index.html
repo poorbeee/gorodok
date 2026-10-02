@@ -141,9 +141,9 @@ function lookupBuilding(osmStreet, osmHouse) {
 async function loadData() {
   setStatus('Загружаю базу Citywalls…');
   try {
-    const resp = await fetch('buildings_index.json');
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const raw = await resp.json();
+    const r1 = await fetch('buildings_index.json');
+    if (!r1.ok) throw new Error('HTTP ' + r1.status);
+    const raw = await r1.json();
     buildingsIndex = new Map();
     for (const [key, value] of Object.entries(raw)) {
       const norm = normalizeKey(key);
@@ -151,9 +151,9 @@ async function loadData() {
       buildingsIndex.get(norm).push(...value);
     }
     setStatus(`Citywalls: ${buildingsIndex.size} адресов. Загружаю POI…`);
-    const respPoi = await fetch('poi_spb.json');
-    if (!respPoi.ok) throw new Error('HTTP ' + respPoi.status);
-    poiDatabase = await respPoi.json();
+    const r2 = await fetch('poi_spb.json');
+    if (!r2.ok) throw new Error('HTTP ' + r2.status);
+    poiDatabase = await r2.json();
     setStatus(`Готово: ${buildingsIndex.size} адресов, ${poiDatabase.length} POI`);
   } catch (e) {
     setStatus('Ошибка загрузки данных: ' + e.message);
@@ -163,8 +163,8 @@ async function loadData() {
 // ================== Геокодирование ==================
 async function geocode(query) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
-  const resp = await fetch(url, { headers: { 'Accept-Language': 'ru' } });
-  const data = await resp.json();
+  const r = await fetch(url, { headers: { 'Accept-Language': 'ru' } });
+  const data = await r.json();
   if (!data.length) throw new Error('Адрес не найден: ' + query);
   return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
 }
@@ -180,8 +180,8 @@ async function buildRoute() {
     const [a, b] = await Promise.all([geocode(qA), geocode(qB)]);
     setStatus('Строю маршрут…');
     const url = `https://router.project-osrm.org/route/v1/foot/${a[1]},${a[0]};${b[1]},${b[0]}?geometries=geojson&overview=full`;
-    const resp = await fetch(url);
-    const data = await resp.json();
+    const r = await fetch(url);
+    const data = await r.json();
     if (!data.routes || !data.routes.length) throw new Error('Маршрут не найден');
     const route = data.routes[0];
     const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
@@ -434,18 +434,18 @@ function showPoiCard(poi, num) {
     btnSpeak.textContent = '⏳ Синтезирую…';
 
     try {
-      const resp = await fetch(API_BASE + '/api/speech', {
+      const r = await fetch(API_BASE + '/api/speech', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text, voice: 'ru-RU-DmitryNeural' })
       });
 
-      if (!resp.ok) {
-        const errText = await resp.text();
-        throw new Error('HTTP ' + resp.status + ': ' + errText.slice(0, 200));
+      if (!r.ok) {
+        const errText = await r.text();
+        throw new Error('HTTP ' + r.status + ': ' + errText.slice(0, 200));
       }
 
-      const blob = await resp.blob();
+      const blob = await r.blob();
       if (audioUrl) URL.revokeObjectURL(audioUrl);
       audioUrl = URL.createObjectURL(blob);
 
@@ -548,9 +548,9 @@ async function generateStory(poi, { forceNew = false } = {}) {
     console.log('[Wiki] Ищем:', title);
     try {
       const apiUrl = `https://ru.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext&redirects=1&format=json&origin=*&titles=${encodeURIComponent(title)}`;
-      const resp = await fetch(apiUrl);
-      if (resp.ok) {
-        const data = await resp.json();
+      const rw = await fetch(apiUrl);
+      if (rw.ok) {
+        const data = await rw.json();
         const first = Object.values(data.query?.pages || {})[0];
         if (first && first.extract) {
           let full = first.extract;
@@ -585,8 +585,13 @@ async function generateStory(poi, { forceNew = false } = {}) {
 4. Абзац 4 — короткое завершение, одна фраза на послевкусие.
 
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО начинать рассказ с фраз:
+- «Представьте себе»
+- «Представьте»
 - «Мы стоим»
+- «Перед нами»
 - «Этот объект»
+- «Этот памятник»
+- «Это здание»
 - «Сегодня мы»
 - «Добро пожаловать»
 - «В самом сердце»
@@ -620,7 +625,7 @@ ${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wi
   const storyEl = document.getElementById('storyText');
   if (storyEl) storyEl.textContent = '✨ Генерирую…';
 
-  const resp = await fetch(API_BASE + '/api/chat', {
+  const rc = await fetch(API_BASE + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -635,15 +640,9 @@ ${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wi
     })
   });
 
-  const resp = await fetch(API_BASE + '/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'payload=' + encodeURIComponent(payload)
-  });
+  if (!rc.ok) throw new Error('GigaChat: HTTP ' + rc.status);
 
-  if (!resp.ok) throw new Error('GigaChat: HTTP ' + resp.status);
-
-  const reader = resp.body.getReader();
+  const reader = rc.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let full = '';
@@ -683,9 +682,9 @@ $btnHere.addEventListener('click', () => {
 
 async function reverseGeocode(lat, lon) {
   const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`;
-  const resp = await fetch(url, { headers: { 'Accept-Language': 'ru' } });
-  if (!resp.ok) throw new Error('Nominatim ' + resp.status);
-  return await resp.json();
+  const r = await fetch(url, { headers: { 'Accept-Language': 'ru' } });
+  if (!r.ok) throw new Error('Nominatim ' + r.status);
+  return await r.json();
 }
 
 map.on('click', async (e) => {
@@ -698,14 +697,12 @@ map.on('click', async (e) => {
     const street = addr.road || addr.pedestrian || addr.footway || addr.square || '';
     const house = addr.house_number || '';
 
-    // Проверяем Citywalls
     let cwItem = null;
     if (street && house) {
       const cw = lookupBuilding(street, house);
       if (cw && cw.length) cwItem = cw[0];
     }
 
-    // Ищем ближайший POI в 30 м
     let nearestPoi = null, nearestD = 30;
     if (poiDatabase) {
       for (const p of poiDatabase) {
@@ -714,7 +711,6 @@ map.on('click', async (e) => {
       }
     }
 
-    // Если совсем ничего нет — сообщение
     if (!street && !cwItem && !nearestPoi) {
       setInfo(`<span class="close" onclick="this.parentNode.innerHTML=''">×</span>
         <h2>Здесь ничего не нашлось</h2>
@@ -723,14 +719,10 @@ map.on('click', async (e) => {
       return;
     }
 
-    // Собираем виртуальный POI для showPoiCard
     const virtualTags = {};
-    if (nearestPoi && nearestPoi.tags) {
-      Object.assign(virtualTags, nearestPoi.tags);
-    }
+    if (nearestPoi && nearestPoi.tags) Object.assign(virtualTags, nearestPoi.tags);
     if (street) virtualTags['addr:street'] = street;
     if (house) virtualTags['addr:housenumber'] = house;
-    // Если у POI нет имени, но есть в Citywalls — используем его
     if (!virtualTags.name && !virtualTags['name:ru'] && cwItem && cwItem.name) {
       virtualTags['name:ru'] = cwItem.name;
     }
