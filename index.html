@@ -221,21 +221,30 @@ function findPOIs(routeCoords, distanceMeters) {
     if (d <= RADIUS) near.push({ ...p, distance: d });
   }
 
+  // ФИКС: отсеиваем безымянные POI без контекста
   const scored = near.map(p => {
     let score = 0;
     const t = p.tags || {};
-    if (p.name) score += 3;
+    const hasName = !!(t['name:ru'] || t.name || p.name);
+    const hasWiki = !!(t.wikipedia || t['wikipedia:ru']);
+
+    // Пропускаем безымянные здания без исторических тегов
+    if (!hasName && !hasWiki && !t.historic && !t.memorial && !t.tourism) {
+      return null;
+    }
+
+    if (hasName) score += 5;
+    if (hasWiki) score += 4;
     if (t.historic) score += 4;
-    if (t.tourism === 'attraction' || t.tourism === 'museum') score += 3;
+    if (t.tourism === 'attraction' || t.tourism === 'museum') score += 4;
     if (t.memorial) score += 3;
     if (t.artwork || t.tourism === 'artwork') score += 1;
     if (t.heritage) score += 3;
-    if (t.wikipedia) score += 2;
-    if (p.category === 'historic_building') score += 1;
+    if (p.category === 'historic_building' && hasName) score += 1;
     if (p.category === 'heritage_building') score += 4;
     score -= p.distance / 100;
     return { ...p, score: Math.max(0.5, score) };
-  });
+  }).filter(Boolean);
 
   const perKm = parseFloat(document.getElementById('densityInput').value) || 2;
   const routeKm = distanceMeters / 1000;
@@ -508,6 +517,28 @@ const OPENINGS = [
 const recentOpenings = [];
 const storyCache = new Map();
 
+async function fetchWikiByTitle(title) {
+  try {
+    const apiUrl = `https://ru.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext&redirects=1&format=json&origin=*&titles=${encodeURIComponent(title)}`;
+    const rw = await fetch(apiUrl);
+    if (!rw.ok) return '';
+    const data = await rw.json();
+    const first = Object.values(data.query?.pages || {})[0];
+    if (!first || !first.extract) return '';
+    let full = first.extract;
+    for (const marker of ['== Ссылки ==', '== Литература ==', '== Примечания ==', '== Источники ==']) {
+      const idx = full.indexOf(marker);
+      if (idx > 0) full = full.slice(0, idx);
+    }
+    if (full.length > 2500) {
+      full = full.slice(0, 2500);
+      const lastDot = full.lastIndexOf('.');
+      if (lastDot > 1500) full = full.slice(0, lastDot + 1);
+    }
+    return full.trim();
+  } catch (e) { return ''; }
+}
+
 async function generateStory(poi, { forceNew = false } = {}) {
   const t = poi.tags || {};
   const cacheKey = poi.id || ('addr:' + (t['addr:street'] || '') + '|' + (t['addr:housenumber'] || ''));
@@ -541,36 +572,12 @@ async function generateStory(poi, { forceNew = false } = {}) {
     }
   }
 
+  // --- Wikipedia ---
   let wiki = '';
   let wikiTitle = '';
   const wikiTag = t.wikipedia || t['wikipedia:ru'] || t['subject:wikipedia'];
 
-  // Функция: подтянуть статью по названию
-  async function fetchWikiByTitle(title) {
-    try {
-      const apiUrl = `https://ru.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext&redirects=1&format=json&origin=*&titles=${encodeURIComponent(title)}`;
-      const rw = await fetch(apiUrl);
-      if (!rw.ok) return '';
-      const data = await rw.json();
-      const first = Object.values(data.query?.pages || {})[0];
-      if (!first || !first.extract) return '';
-      let full = first.extract;
-      for (const marker of ['== Ссылки ==', '== Литература ==', '== Примечания ==', '== Источники ==']) {
-        const idx = full.indexOf(marker);
-        if (idx > 0) full = full.slice(0, idx);
-      }
-      if (full.length > 2500) {
-        full = full.slice(0, 2500);
-        const lastDot = full.lastIndexOf('.');
-        if (lastDot > 1500) full = full.slice(0, lastDot + 1);
-      }
-      return full.trim();
-    } catch (e) {
-      return '';
-    }
-  }
-
-  // Способ 1: если есть тег wikipedia — берём прямо из него
+  // Способ 1: тег wikipedia в OSM
   if (wikiTag) {
     const title = wikiTag.replace(/^ru:/, '').replace(/#.*$/, '').replace(/\|.*$/, '').trim();
     console.log('[Wiki] По тегу:', title);
@@ -579,56 +586,64 @@ async function generateStory(poi, { forceNew = false } = {}) {
     console.log('[Wiki] Получено', wiki.length, 'символов');
   }
 
-  // Способ 2: если тега нет, но есть адрес — ищем статью по адресу
-  if (!wiki && t['addr:street'] && t['addr:housenumber']) {
-    const street = t['addr:street'];
-    const house = t['addr:housenumber'];
-    const searchQuery = `${street} ${house} Санкт-Петербург`;
-    console.log('[Wiki] Поиск по адресу:', searchQuery);
+  // Способ 2: geosearch по координатам POI
+  if (!wiki && poi.lat && poi.lon) {
+    console.log('[Wiki] Geosearch по координатам:', poi.lat, poi.lon);
     try {
-      // Шаг 1: ищем подходящие статьи
-      const searchUrl = `https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(searchQuery)}&srlimit=3&format=json&origin=*`;
-      const rs = await fetch(searchUrl);
-      if (rs.ok) {
-        const sdata = await rs.json();
-        const hits = sdata.query?.search || [];
-        console.log('[Wiki] Найдено статей:', hits.length);
+      const geoUrl = `https://ru.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${poi.lat}%7C${poi.lon}&gsradius=200&gslimit=15&format=json&origin=*`;
+      const rg = await fetch(geoUrl);
+      if (rg.ok) {
+        const gdata = await rg.json();
+        const geoHits = gdata.query?.geosearch || [];
+        console.log('[Wiki] Найдено статей рядом:', geoHits.length);
 
-        // Шаг 2: берём первую, у которой в названии/тексте совпадает номер дома
-        for (const hit of hits) {
-          const hitTitle = hit.title;
-          const snippet = (hit.snippet || '').replace(/<[^>]+>/g, '');
+        const house = (t['addr:housenumber'] || '').toLowerCase();
+        const streetRaw = (t['addr:street'] || '').toLowerCase();
+        const streetWords = streetRaw
+          .replace(/ул(ица)?\.?|пр(оспект)?\.?|наб(ережная)?\.?|пер(еулок)?\.?|пл(ощадь)?\.?|проезд|аллея|бульвар/g, '')
+          .trim().split(/\s+/).filter(w => w.length > 3);
 
-          // Проверяем, что в статье реально упоминается наш адрес
-          const addressMatch = snippet.includes(house) ||
-                               hitTitle.includes(house) ||
-                               (street.includes('Марата') && snippet.includes('Марата'));
+        for (const hit of geoHits) {
+          console.log('[Wiki] Проверяем статью:', hit.title);
+          const extract = await fetchWikiByTitle(hit.title);
+          if (!extract) continue;
 
-          if (!addressMatch && hits.length > 1) continue;
+          const lower = extract.toLowerCase();
+          const addressMatch =
+            (house && lower.includes(house)) ||
+            streetWords.some(w => lower.includes(w));
 
-          console.log('[Wiki] Пробуем статью:', hitTitle);
-          const extract = await fetchWikiByTitle(hitTitle);
-          if (extract) {
-            // Проверяем ещё раз — в полном тексте должно быть упоминание номера дома
-            const mentionsHouse = extract.includes(house) ||
-                                  extract.includes(street.split(' ').slice(1).join(' '));
-            if (mentionsHouse) {
-              wiki = extract;
-              wikiTitle = hitTitle;
-              console.log('[Wiki] Подошла:', hitTitle, '—', wiki.length, 'символов');
-              break;
-            }
+          // Берём, если совпал адрес ИЛИ статья единственная в радиусе
+          if (addressMatch || geoHits.length === 1) {
+            wiki = extract;
+            wikiTitle = hit.title;
+            console.log('[Wiki] Подошла:', hit.title, '—', wiki.length, 'символов');
+            break;
           }
         }
       }
-    } catch (e) { console.warn('[Wiki] Ошибка поиска:', e.message); }
+    } catch (e) { console.warn('[Wiki] Ошибка geosearch:', e.message); }
   }
 
   if (!wiki) {
     console.log('[Wiki] Ничего не нашли');
   } else {
-    // Добавляем название статьи в факты, чтобы GigaChat понимал контекст
     facts.unshift(`Название объекта в Википедии: ${wikiTitle}`);
+  }
+
+  // ФИКС: если фактов мало — не зовём GigaChat, показываем честный текст
+  const hasSubstantial = !!(wiki || facts.length >= 3);
+
+  if (!hasSubstantial) {
+    const short = 'Об этом объекте сохранилось мало сведений. ' +
+      (t['addr:street'] ? `Он находится по адресу: ${t['addr:street']}${t['addr:housenumber'] ? ', ' + t['addr:housenumber'] : ''}. ` : '') +
+      (t.start_date ? `Известно, что здание построено в ${t.start_date} году. ` : '') +
+      (t.architect ? `Архитектор: ${t.architect}. ` : '') +
+      'Чтобы узнать больше, стоит обратиться к краеведческой литературе.';
+    storyCache.set(cacheKey, short);
+    const el = document.getElementById('storyText');
+    if (el) el.textContent = short;
+    return short;
   }
 
   const angle = OPENINGS[Math.floor(Math.random() * OPENINGS.length)];
