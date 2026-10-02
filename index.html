@@ -528,7 +528,6 @@ async function fetchWikiByTitle(title) {
       const idx = full.indexOf(marker);
       if (idx > 0) full = full.slice(0, idx);
     }
-    // Увеличили до 4500 символов
     if (full.length > 4500) {
       full = full.slice(0, 4500);
       const lastDot = full.lastIndexOf('.');
@@ -538,7 +537,20 @@ async function fetchWikiByTitle(title) {
   } catch (e) { return ''; }
 }
 
-// Собираем информацию о том, что сейчас в здании и что рядом
+// Строгая проверка: есть ли в тексте НАШ номер дома (как отдельное число)
+// и нет ли чужого номера для той же улицы
+function checkAddressMatch(text, house, streetWords) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+
+  const houseRegex = new RegExp(`(?:^|[^0-9])${house}(?:[^0-9]|$)`);
+  const houseMatch = houseRegex.test(lower);
+
+  const streetMatch = streetWords.length > 0 && streetWords.some(w => lower.includes(w));
+
+  return houseMatch && streetMatch;
+}
+
 function collectContext(poi) {
   const t = poi.tags || {};
   const currentUse = [];
@@ -556,7 +568,6 @@ function collectContext(poi) {
   if (t.tourism === 'museum') currentUse.push('музей');
   if (t.leisure) currentUse.push(t.leisure);
 
-  // Соседи в радиусе 40 м
   const neighbors = [];
   if (poiDatabase && poi.lat && poi.lon) {
     for (const p of poiDatabase) {
@@ -617,7 +628,6 @@ async function generateStory(poi, { forceNew = false } = {}) {
     }
   }
 
-  // Контекст: что сейчас в здании и что рядом
   const { currentUse, neighbors } = collectContext(poi);
 
   // --- Wikipedia ---
@@ -634,32 +644,35 @@ async function generateStory(poi, { forceNew = false } = {}) {
   }
 
   if (!wiki && poi.lat && poi.lon) {
-    console.log('[Wiki] Geosearch:', poi.lat, poi.lon);
+    console.log('[Wiki] Geosearch (80 м):', poi.lat, poi.lon);
     try {
-      const geoUrl = `https://ru.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${poi.lat}%7C${poi.lon}&gsradius=200&gslimit=15&format=json&origin=*`;
+      const geoUrl = `https://ru.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${poi.lat}%7C${poi.lon}&gsradius=80&gslimit=20&format=json&origin=*`;
       const rg = await fetch(geoUrl);
       if (rg.ok) {
         const gdata = await rg.json();
         const geoHits = gdata.query?.geosearch || [];
         console.log('[Wiki] Найдено статей:', geoHits.length);
 
-        const house = (t['addr:housenumber'] || '').toLowerCase();
+        const house = (t['addr:housenumber'] || '').toLowerCase().trim();
         const streetRaw = (t['addr:street'] || '').toLowerCase();
         const streetWords = streetRaw
           .replace(/ул(ица)?\.?|пр(оспект)?\.?|наб(ережная)?\.?|пер(еулок)?\.?|пл(ощадь)?\.?|проезд|аллея|бульвар/g, '')
           .trim().split(/\s+/).filter(w => w.length > 3);
 
         for (const hit of geoHits) {
+          console.log('[Wiki] Проверяем:', hit.title, `(${hit.dist}м)`);
           const extract = await fetchWikiByTitle(hit.title);
           if (!extract) continue;
-          const lower = extract.toLowerCase();
-          const addressMatch = (house && lower.includes(house)) || streetWords.some(w => lower.includes(w));
-          if (addressMatch || geoHits.length === 1) {
-            wiki = extract;
-            wikiTitle = hit.title;
-            console.log('[Wiki] Подошла:', hit.title, '—', wiki.length, 'символов');
-            break;
+
+          if (house && !checkAddressMatch(extract, house, streetWords)) {
+            console.log('[Wiki] Отбрасываем — номер дома не совпал');
+            continue;
           }
+
+          wiki = extract;
+          wikiTitle = hit.title;
+          console.log('[Wiki] ✅ Подошла:', hit.title, '—', wiki.length, 'символов');
+          break;
         }
       }
     } catch (e) { console.warn('[Wiki] Geosearch ошибка:', e.message); }
@@ -684,11 +697,11 @@ async function generateStory(poi, { forceNew = false } = {}) {
   const hasSubstantial = !!(wiki || facts.length >= 3);
 
   if (!hasSubstantial) {
-    const short = 'Об этом объекте сохранилось мало сведений. ' +
+    const short = 'В моей базе мало сведений об этом объекте. ' +
       (t['addr:street'] ? `Он находится по адресу: ${t['addr:street']}${t['addr:housenumber'] ? ', ' + t['addr:housenumber'] : ''}. ` : '') +
       (t.start_date ? `Известно, что здание построено в ${t.start_date} году. ` : '') +
       (t.architect ? `Архитектор: ${t.architect}. ` : '') +
-      'Чтобы узнать больше, стоит обратиться к краеведческой литературе.';
+      'Возможно, вам удастся узнать больше в краеведческой литературе или у местных жителей.';
     storyCache.set(cacheKey, short);
     const el = document.getElementById('storyText');
     if (el) el.textContent = short;
@@ -698,22 +711,23 @@ async function generateStory(poi, { forceNew = false } = {}) {
   const angle = OPENINGS[Math.floor(Math.random() * OPENINGS.length)];
   const avoidOpenings = recentOpenings.slice(-3).map(s => '• ' + s).join('\n');
 
+  const explicitAddress = (t['addr:street'] && t['addr:housenumber'])
+    ? `${t['addr:street']}, ${t['addr:housenumber']}`
+    : '';
+
   const system = `Ты — опытный экскурсовод по Санкт-Петербургу. Пишешь рассказы для аудиогида длиной 400-550 слов.
+
+ВАЖНО ПРО АДРЕС: рассказ идёт про здание по адресу "${explicitAddress}". Если в блоке «Контекст из Wikipedia» упоминается ДРУГОЙ адрес (другая улица или другой номер дома) — это ошибка, используй из Wikipedia только те факты, которые относятся именно к "${explicitAddress}". Если статья явно не про этот дом — не используй её вообще, скажи что в моей базе мало сведений.
 
 СТРУКТУРА (держи её в уме, но НЕ пиши эти слова в тексте):
 1. Зацепка — начни так, как указано ниже.
 2. История: кто, когда, зачем построил. Имена, даты, цифры — только из фактов.
-3. Архитектура: что человек увидит, если поднимет взгляд. Опиши фасад: балконы, орнаменты, окна, надписи. Слова «посмотрите», «присмотритесь», «найдите глазами».
-4. Что здесь сейчас: используй блок «Сейчас в здании» и «Рядом находится», если они есть. Скажи, что там теперь — библиотека, музей, магазин, офис.
-5. Курьёз или яркая деталь — что-то неожиданное: странный факт, городская легенда, известный житель, необычное назначение. Если такого нет в фактах — ПРОПУСТИ этот абзац, не выдумывай.
-6. Короткое завершение — одна конкретная фраза, без философии.
+3. Архитектура: что человек увидит на фасаде. Слова «посмотрите», «присмотритесь», «найдите глазами».
+4. Что здесь сейчас: используй блок «Сейчас в здании» и «Рядом находится», если они есть.
+5. Курьёз или яркая деталь — что-то неожиданное. Если такого нет — ПРОПУСТИ.
+6. Короткое завершение — одна конкретная фраза.
 
 ВАЖНО: НЕ пиши слова «Зацепка», «Контекст», «Деталь», «Завершение», «Абзац 1» и т.п. Ни с двоеточием, ни без. Пиши один связный текст без подзаголовков, без ** и без markdown-разметки.
-
-ОБЯЗАТЕЛЬНО:
-- В первых двух абзацах — имя архитектора, год, заказчик, первое назначение (если есть в фактах).
-- В абзаце про фасад — конкретные детали, а не «изящный декор».
-- В абзаце «что сейчас» — используй реальные данные из блока «Сейчас в здании»/«Рядом находится».
 
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
 - Начинать с фраз: «Представьте себе», «Мы стоим», «Перед нами», «Этот объект», «Этот памятник», «Это здание», «Сегодня мы», «Добро пожаловать», «В самом сердце».
@@ -725,20 +739,18 @@ async function generateStory(poi, { forceNew = false } = {}) {
 - НЕ придумывай названия других зданий, других архитекторов, других событий, которых нет в фактах.
 - Если чего-то нет — не упоминай. Лучше короткий рассказ, чем длинный с выдумками.
 
-ПРИМЕР ХОРОШЕГО РАССКАЗА (не копируй, ориентируйся на стиль):
-«Филадельф Бажанов умер за полгода до того, как его дом принял первых жильцов. Купец первой гильдии и директор Товарищества, он задумывал этот дом как целый мир — квартиры для служащих, столовые, конюшни и даже коровник во дворе. Архитектор Павел Алёшин взялся за проект в 1907 году и создал один из первых в Петербурге домов-коммун. Посмотрите на фасад: за внешней строгостью модерна скрывается продуманная логика — каждое помещение получило свет. Ажурная решётка на балконе второго этажа — не просто украшение, растительный орнамент читается и в других его работах. Сегодня здесь детская библиотека имени Пушкина — и зал с высокими потолками по-прежнему хранит запах старого дерева.»
-
 ${avoidOpenings ? 'НЕ начинай рассказ так же, как эти недавние рассказы:\n' + avoidOpenings + '\n' : ''}
 
 Начни так:
 ${angle}`;
 
   const user = `Объект: ${t['name:ru'] || t.name || poi.name || 'Без названия'}
+Адрес: ${explicitAddress || '(не указан)'}
 
 Факты:
 ${facts.length ? facts.map(f => '• ' + f).join('\n') : '• (фактов мало)'}
 
-${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wikipedia отсутствует.'}
+${wiki ? 'Контекст из Wikipedia (относится к ' + (wikiTitle || 'статье') + '):\n' + wiki : 'Контекст из Wikipedia отсутствует.'}
 
 Напиши рассказ для аудиогида (400-550 слов).`;
 
