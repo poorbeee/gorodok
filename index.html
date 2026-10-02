@@ -221,14 +221,12 @@ function findPOIs(routeCoords, distanceMeters) {
     if (d <= RADIUS) near.push({ ...p, distance: d });
   }
 
-  // ФИКС: отсеиваем безымянные POI без контекста
   const scored = near.map(p => {
     let score = 0;
     const t = p.tags || {};
     const hasName = !!(t['name:ru'] || t.name || p.name);
     const hasWiki = !!(t.wikipedia || t['wikipedia:ru']);
 
-    // Пропускаем безымянные здания без исторических тегов
     if (!hasName && !hasWiki && !t.historic && !t.memorial && !t.tourism) {
       return null;
     }
@@ -572,12 +570,10 @@ async function generateStory(poi, { forceNew = false } = {}) {
     }
   }
 
-  // --- Wikipedia ---
   let wiki = '';
   let wikiTitle = '';
   const wikiTag = t.wikipedia || t['wikipedia:ru'] || t['subject:wikipedia'];
 
-  // Способ 1: тег wikipedia в OSM
   if (wikiTag) {
     const title = wikiTag.replace(/^ru:/, '').replace(/#.*$/, '').replace(/\|.*$/, '').trim();
     console.log('[Wiki] По тегу:', title);
@@ -586,7 +582,6 @@ async function generateStory(poi, { forceNew = false } = {}) {
     console.log('[Wiki] Получено', wiki.length, 'символов');
   }
 
-  // Способ 2: geosearch по координатам POI
   if (!wiki && poi.lat && poi.lon) {
     console.log('[Wiki] Geosearch по координатам:', poi.lat, poi.lon);
     try {
@@ -613,7 +608,6 @@ async function generateStory(poi, { forceNew = false } = {}) {
             (house && lower.includes(house)) ||
             streetWords.some(w => lower.includes(w));
 
-          // Берём, если совпал адрес ИЛИ статья единственная в радиусе
           if (addressMatch || geoHits.length === 1) {
             wiki = extract;
             wikiTitle = hit.title;
@@ -631,7 +625,6 @@ async function generateStory(poi, { forceNew = false } = {}) {
     facts.unshift(`Название объекта в Википедии: ${wikiTitle}`);
   }
 
-  // ФИКС: если фактов мало — не зовём GigaChat, показываем честный текст
   const hasSubstantial = !!(wiki || facts.length >= 3);
 
   if (!hasSubstantial) {
@@ -649,17 +642,21 @@ async function generateStory(poi, { forceNew = false } = {}) {
   const angle = OPENINGS[Math.floor(Math.random() * OPENINGS.length)];
   const avoidOpenings = recentOpenings.slice(-3).map(s => '• ' + s).join('\n');
 
-  const system = `Ты — опытный экскурсовод по Санкт-Петербургу. Пишешь рассказы для аудиогида длиной 250-350 слов (3-4 абзаца).
+  const system = `Ты — опытный экскурсовод по Санкт-Петербургу. Пишешь рассказы для аудиогида длиной 250-350 слов.
 
 СТРУКТУРА (держи её в уме, но НЕ пиши эти слова в тексте):
-1. Зацепка (см. инструкцию ниже).
-2. Контекст: что за объект, кто создал, когда и зачем. Конкретные имена, даты, цифры — только из фактов.
+1. Зацепка — начни так, как указано ниже.
+2. Контекст: что за объект, кто создал, когда и зачем. Только конкретные имена, даты, цифры из фактов.
 3. Одна деталь, которую не видно с первого взгляда.
 4. Короткое завершение, одна фраза на послевкусие.
 
 ВАЖНО: НЕ пиши слова «Зацепка», «Контекст», «Деталь», «Завершение», «Абзац 1» и т.п. — ни с двоеточием, ни без. Это внутренняя структура, а не часть текста. Пиши один связный текст без подзаголовков, без ** и без markdown-разметки.
 
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО начинать рассказ с фраз:
+- «Представьте себе»
+- «Представьте»
+- «Мы стоим»
+- «Перед нами»
 - «Этот объект»
 - «Этот памятник»
 - «Это здание»
@@ -681,9 +678,9 @@ ${angle}
 
 НЕ ВЫДУМЫВАЙ:
 - Имена, даты, события — только из блоков «Факты» и «Контекст из Wikipedia».
-- НЕ придумывай названия других зданий, других архитекторов, других событий, которых нет в фактах. Например, если объект — Дом Бажанова, не пиши про «соседний дом Блока» или другие объекты, которых нет в фактах.
+- НЕ придумывай названия других зданий, других архитекторов, других событий, которых нет в фактах.
 - OSM-тег "architect" у памятников часто означает архитектора постамента, а не скульптора. Если в Wikipedia есть имя скульптора — используй его.
-- Если информации мало — пиши короче, но не выдумывай.
+- Если информации мало — пиши короче, но не выдумывай.`;
 
   const user = `Объект: ${t['name:ru'] || t.name || poi.name || 'Без названия'}
 
@@ -692,7 +689,7 @@ ${facts.length ? facts.map(f => '• ' + f).join('\n') : '• (фактов ма
 
 ${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wikipedia отсутствует.'}
 
-Напиши рассказ для аудиогида по структуре из 4 абзацев.`;
+Напиши рассказ для аудиогида.`;
 
   const storyEl = document.getElementById('storyText');
   if (storyEl) storyEl.textContent = '✨ Генерирую…';
@@ -737,7 +734,6 @@ ${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wi
     }
   }
 
-  // Чистим markdown и служебные метки
   full = full
     .replace(/\*\*(Зацепка|Контекст|Деталь|Завершение|Введение|Основная часть|Заключение|Абзац \d+)\*\*\s*:?\s*/gi, '')
     .replace(/\*\*/g, '')
@@ -750,7 +746,6 @@ ${wiki ? 'Контекст из Wikipedia:\n' + wiki : 'Контекст из Wi
   recentOpenings.push(opening);
   if (recentOpenings.length > 5) recentOpenings.shift();
 
-  // Обновляем отображение после чистки
   if (storyEl) storyEl.textContent = full;
 
   return full;
