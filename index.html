@@ -76,6 +76,9 @@ const map = L.map('map').setView([59.9343, 30.3351], 14);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap', maxZoom: 19
 }).addTo(map);
+map.attributionControl.setPrefix(
+  '<a href="https://leafletjs.com" title="A JavaScript library for interactive maps">Leaflet</a>'
+);
 
 let routeLayer = null;
 let poiLayers = [];
